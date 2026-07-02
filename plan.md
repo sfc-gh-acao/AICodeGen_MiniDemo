@@ -60,13 +60,7 @@ A **Cortex Agent** sits on top of one or more semantic views and handles the orc
 
 **Core use case: Sales & Marketing Funnel Intelligence, queried through a Cortex Agent**
 
-A Streamlit-in-Snowflake application with two tabs:
-
-1. **Dashboard tab** — pre-built visualizations showing key funnel KPIs (charts and tables). For board-level and leadership reporting. Always reflects current data.
-
-2. **Agent chat tab** — Cortex Agent backed by a semantic view over the sales/marketing data. Business users ask plain English questions, the agent queries the semantic view and returns answers, Streamlit renders results including visualizations where appropriate.
-
-Synthetic data simulates the full customer journey: HubSpot leads → Salesforce opportunities/activities → NetSuite contracts/invoices.
+Synthetic data simulates the full customer journey: Salesforce leads/opportunities/activities + NetSuite contracts/invoices.
 
 The demo story:
 > *"Right now your sales team is tracking this in spreadsheets and your marketing team is in HubSpot. Here's what it looks like when that data is consolidated, defined consistently, and your sales leader can just ask it a question — without calling anyone."*
@@ -88,111 +82,136 @@ The demo story:
 ### Assumptions
 
 1. Synthetic data is inserted as gold-quality, business-ready tables — no raw ingestion layer needed for demo purposes
-2. Schema structure still represents the medallion pattern to tell the right production story
-3. Salesforce and NetSuite object models follow standard B2B SaaS conventions — specific eClinical field names TBD
-4. The agent is stateless — each question is independent, no session memory
-5. Agent uses one primary tool: the sales/marketing semantic view
-6. All compute runs on a single standard warehouse (X-Small or Small)
-7. Funnel metrics use standard B2B SaaS definitions
+2. Salesforce and NetSuite object models follow standard B2B SaaS conventions — eClinical-specific custom fields assumed and narrated
+3. The agent is stateless — each question is independent, no session memory
+4. Agent uses one primary tool: the sales/marketing semantic view
+5. All compute runs on a single standard warehouse (X-Small or Small)
+6. Funnel metrics use standard B2B SaaS definitions
 
 ---
 
-## Technical Architecture
+## Technical Architecture (v3 — revised July 2, 2026)
 
-### Data Layer
+### Demo Pattern
+Follows Cody's end-to-end reference implementation. Two Snowflake notebooks + one Streamlit app.
+
+- **Notebook 1:** Create database/schema, build all dim + fact tables, load synthetic data, run validation queries, run example analytical queries, FastGen to generate semantic YAML, create semantic view, CREATE AGENT
+- **Notebook 2:** Data validation framework — staging tables (VARCHAR mirrors), intentional bad records, validation rules (NULL / type / domain / FK / business rules), VALIDATION_LOG, promote clean records
+- **Streamlit:** 3 tabs — Data Quality validation dashboard, Funnel Dashboard (KPI cards + charts), AI Assistant (agent chat)
+
+### Data Sources
+- **Salesforce** — full customer journey: leads, accounts, opportunities, activities, sales reps
+- **NetSuite** — post-sales finance: contracts/SOWs, invoices, bid vs. did
+- **HubSpot** — NOT modeled. Lead source attribution travels into Salesforce when leads sync. Mentioned in demo narrative as future expansion only.
+
+### Star Schema Data Model
 
 ```
-CURATED schema              →  SEMANTIC layer
-────────────────────────────   ──────────────────────────
-dim_leads                      Semantic View:
-dim_accounts                     eclinical_funnel_sv
-dim_opportunities
-fact_funnel_events            (Agent Tool 1)
-fact_revenue
+FACT_LEADS              [Salesforce]
+├── DIM_DATE
+├── DIM_ACCOUNT         [Salesforce → shared with NetSuite]
+├── DIM_SALES_REP       [Salesforce]
+└── DIM_LEAD_SOURCE     [Salesforce]
+
+FACT_OPPORTUNITIES      [Salesforce]
+├── DIM_DATE
+├── DIM_ACCOUNT         [shared]
+├── DIM_SALES_REP       [Salesforce]
+├── DIM_LEAD_SOURCE     [Salesforce]
+└── DIM_PRODUCT         [optional — not load-bearing for demo questions]
+
+FACT_ACTIVITIES         [Salesforce]
+├── DIM_DATE
+├── DIM_ACCOUNT         [shared]
+└── DIM_SALES_REP       [Salesforce]
+
+FACT_CONTRACTS          [NetSuite]
+├── DIM_DATE
+├── DIM_ACCOUNT         [shared]
+└── DIM_PRODUCT         [shared]
+
+FACT_INVOICES           [NetSuite]
+├── DIM_DATE
+└── DIM_ACCOUNT         [shared]
 ```
 
-- **CURATED:** Gold-quality synthetic tables, directly populated for demo. In production these would be fed by Dynamic Tables from a raw ingestion layer (OpenFlow / Snowpipe).
-- **SEMANTIC:** Semantic View over curated tables — defines business metrics, trusted definitions, and relationships for the Cortex Agent.
-
-*Production path (narrated in demo, not built):* Raw data from HubSpot/Salesforce/NetSuite lands via OpenFlow → Dynamic Tables transform to curated → same semantic view applies.
-
-### Snowflake Features Used
-
-| Feature | Role in MVP |
-|---|---|
-| Semantic Views | Business metric definitions and trust layer for the agent |
-| Cortex Agent | Orchestrator — receives questions, calls semantic view tool, returns answers |
-| Streamlit-in-Snowflake | App UI — dashboard tab + agent chat tab |
-| Synthetic data (SQL/Python) | Populates gold-quality curated tables |
+DIM_ACCOUNT is the conformed dimension bridging Salesforce and NetSuite. Populated from Salesforce but referenced by all fact tables.
 
 ### Database Structure
 
 ```
 Database: ECLINICAL_DEMO
-  Schema: CURATED   (gold tables)
-  Schema: SEMANTIC  (semantic view)
-  Schema: APP       (Streamlit lives here)
+  Schema: SALES_FUNNEL  (all tables, staging, semantic view, agent — single schema for demo)
 ```
 
-### Key Metrics to Define in Semantic View
+Production path (narrated, not built): CURATED schema fed by Dynamic Tables from OpenFlow connectors to Salesforce/NetSuite. Medallion split told narratively.
 
-- **MQL Volume** — total leads created in period
-- **MQL Action Rate** — % of leads contacted within SLA window
-- **Lead-to-Opportunity Conversion Rate**
-- **Opportunity Win Rate**
-- **Average Sales Cycle Length** (days from lead created to close)
-- **ARR / New ARR** — from closed-won opportunities
-- **Services Backlog** — contracted services value not yet invoiced
-- **Bid vs. Did** — contracted services value vs. actual invoiced amount
+### Snowflake Features Used
+
+| Feature | Role in demo |
+|---|---|
+| Snowflake Notebooks | Two notebooks: dimensional model + data validation |
+| Semantic Views | Auto-generated via FastGen, defines business metrics and relationships |
+| Cortex Agent | Orchestrator backed by semantic view, used through Snowflake Intelligence |
+| Streamlit-in-Snowflake | 3-tab app: Data Quality + Funnel Dashboard + AI Assistant |
+| SYSTEM$CORTEX_ANALYST_FAST_GENERATION | Auto-generates semantic YAML from table metadata |
+| SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML | Materializes semantic view from FastGen output |
+
+### Key Metrics (7 Demo Questions from Venu's Call)
+
+| # | Question | Tables |
+|---|---|---|
+| 1 | Marketing funnel performance — leads → MQL → pipeline by channel | FACT_LEADS, DIM_LEAD_SOURCE, DIM_DATE |
+| 2 | MQL action rate — days from lead to first rep follow-up (broken today) | FACT_LEADS, FACT_ACTIVITIES, DIM_SALES_REP |
+| 3 | Pipeline to revenue — win rate, ARR, time to close by rep + segment | FACT_OPPORTUNITIES, DIM_SALES_REP, DIM_ACCOUNT |
+| 4 | Commission / quota tracking — closed won ARR per rep per quarter | FACT_OPPORTUNITIES, DIM_SALES_REP, DIM_DATE |
+| 5 | Bid vs. did — contracted services vs. actual invoiced | FACT_CONTRACTS, FACT_INVOICES, DIM_ACCOUNT |
+| 6 | Finance backlog — contracted revenue not yet invoiced | FACT_CONTRACTS, FACT_INVOICES, DIM_DATE |
+| 7 | GRR / ERR — ARR retained and expanded, for board reporting | FACT_CONTRACTS, DIM_ACCOUNT, DIM_DATE |
 
 ---
 
 ## Agent Scoping Principles
 
-These apply to keep the demo reliable and the scope tight:
-
-- **One primary tool** — the sales/marketing semantic view. Scope every demo question to what that tool can answer.
-- **Defined question domain** — the agent answers questions about the sales funnel and marketing performance. Questions outside that domain return a graceful "I can't help with that."
-- **Tight system prompt** — explicitly names the agent's purpose, the tool it uses, and what it does not do.
-- **Verified queries** — the happy path questions for the demo are tested and locked down before presentation day.
-- **Stateless** — each question is independent. Simpler, more predictable, sufficient for this use case.
-- **Failure handling** — if the agent returns an unexpected answer, the demo recovery is rehearsed. No questions outside the verified set during the live presentation.
-- **Model selection** — test at least two models; prefer the one that stays on task without over-reasoning.
+- **One primary tool** — the sales funnel semantic view
+- **Defined question domain** — sales funnel, marketing performance, revenue, services. Out-of-scope returns a graceful refusal.
+- **Tight system prompt** — names the agent's purpose, tool, and boundaries explicitly
+- **Verified queries** — 7 demo questions tested and locked before presentation day
+- **Stateless** — each question independent; sufficient for this demo
+- **Failure handling** — rehearsed recovery; no off-script questions during live presentation
 
 ---
 
-## Implementation Steps
+## Implementation Steps (v3)
 
-> Steps are ordered. No step begins before the prior one is validated.
+### Notebook 1 — Dimensional Model + Agent
+- [ ] Create database ECLINICAL_DEMO and schema SALES_FUNNEL
+- [ ] Create dimension tables: DIM_DATE, DIM_ACCOUNT, DIM_SALES_REP, DIM_LEAD_SOURCE, DIM_PRODUCT
+- [ ] Create fact tables: FACT_LEADS, FACT_OPPORTUNITIES, FACT_ACTIVITIES, FACT_CONTRACTS, FACT_INVOICES
+- [ ] Load synthetic data — realistic eClinical-domain records covering all 7 demo questions
+- [ ] Run validation queries (row counts, FK integrity)
+- [ ] Run example analytical queries demonstrating each metric
+- [ ] FastGen → SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML → verify semantic view
+- [ ] CREATE OR REPLACE AGENT backed by semantic view
 
-### Phase 1 — Foundation
-- [ ] Create Snowflake database, schemas, and warehouse
-- [ ] Write and run synthetic data generation script (gold-quality tables: leads, opportunities, activities, invoices)
-- [ ] Validate data looks realistic and covers the demo story (funnel from lead to closed revenue)
+### Notebook 2 — Data Validation Framework
+- [ ] Create VALIDATION_LOG table
+- [ ] Create VARCHAR-only staging tables (STG_DIM_*, STG_FACT_*)
+- [ ] Load staging data with intentional bad records (NULL required fields, invalid types, orphaned FKs, business rule violations)
+- [ ] Run validation rules: NULL checks, data type, domain, FK integrity, business rules
+- [ ] Validation summary and per-record scorecard
+- [ ] Promote clean records to production tables
 
-### Phase 2 — Semantic Layer
-- [ ] Author Semantic View (`eclinical_funnel_sv`) over curated tables
-- [ ] Define all metrics and dimensions listed above
-- [ ] Add verified queries (VQRs) for the demo question set
-- [ ] Validate Cortex Analyst can answer those questions correctly (Analyst is used as the tool internally)
+### Streamlit App — 3 Tabs
+- [ ] Tab 1 — Data Quality: validation run selector, issue heatmap, pass/fail scorecard, record drill-down with fix SQL
+- [ ] Tab 2 — Funnel Dashboard: KPI cards (MQL volume, win rate, ARR, bid vs. did), funnel chart, trend chart
+- [ ] Tab 3 — AI Assistant: agent chat interface, pre-loaded demo questions, renders results as tables/charts
 
-### Phase 3 — Agent
-- [ ] Define and configure Cortex Agent with semantic view as Tool 1
-- [ ] Write system prompt — purpose, scope, tool description, out-of-scope behavior
-- [ ] Test agent against verified question set
-- [ ] Confirm reliable, consistent answers on the happy path
-
-### Phase 4 — Application
-- [ ] Scaffold Streamlit-in-Snowflake app (two tabs: Dashboard + Agent Chat)
-- [ ] Build dashboard tab: KPI cards + funnel chart + trend visualization
-- [ ] Build agent chat tab: agent integration, render results including charts where appropriate
-- [ ] Polish UI — eClinical's story, not a generic demo
-
-### Phase 5 — Demo Prep
-- [ ] Write demo script (2-3 questions that tell the funnel story end to end)
-- [ ] Identify 2+ CoCo interactions to narrate during presentation
-- [ ] Prepare "path to production" narrative
-- [ ] Confirm app runs end-to-end, all queries return correct results
+### Demo Prep
+- [ ] Write demo script: manual reporting before-state → validation layer → business dashboard → agent moment
+- [ ] Identify 2+ CoCo interactions to narrate
+- [ ] Rehearse failure recovery for off-script agent responses
+- [ ] Confirm full end-to-end run
 
 ---
 
@@ -201,6 +220,5 @@ These apply to keep the demo reliable and the scope tight:
 - **Semantic Views as trust layer** — business metric definitions are centralized, consistent across all queries, not embedded in application code
 - **Cortex Agent for cross-functionality** — architecture supports adding new data domains as tools without rebuilding the interface
 - **Streamlit-in-Snowflake** — no external deployment, data never leaves the platform
-- **Schema separation** — curated data isolated from app layer; lineage is clear
 - **Single warehouse, right-sized** — X-Small for development; upgrade path documented for production load
 - **Stateless agent** — simpler, more predictable for demo; session memory can be added in production
